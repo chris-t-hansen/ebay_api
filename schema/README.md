@@ -6,6 +6,7 @@ directory is the authoritative table list; it supersedes the 7-table sketch in `
 ## Commands
 
 ```bash
+python schema/check_connection.py              # is .env valid? prints no secret values
 python schema/apply_migrations.py --status     # what is pending, change nothing
 python schema/apply_migrations.py --dry-run    # validate + report, change nothing
 python schema/apply_migrations.py              # apply to DB_NAME from .env
@@ -75,6 +76,12 @@ item_condition ───┘                  │
 - **`api_sync_state`** is what makes incremental polling of bids, messages and orders possible.
 - Sandbox and production coexist as two `ebay_marketplace` rows (`environment_code`), so no
   second database is required.
+- **Publishing hooks for the Sell Inventory API:** `listing.ebay_offer_id` holds the `offerId`
+  (required to update/withdraw/publish) and `listing.ebay_item_id` is filled only after publishing;
+  both are UNIQUE and nullable so a local draft is a legal row. `listing.listing_duration_code`
+  stores eBay's enum (`Days_7`, `GTC`) alongside the friendly `duration_days` number, and
+  `listing.scheduled_start_time_utc` maps to the offer's `listingStartDate` scheduling field.
+  See SKILL.md §5 for the full API strategy and the open items.
 
 ## Known follow-ups
 

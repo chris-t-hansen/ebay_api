@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS listing (
   view_count            INT UNSIGNED       NULL COMMENT 'reported by eBay, not derivable locally',
   watcher_count         INT UNSIGNED       NULL,
   ebay_item_id          VARCHAR(20)        NULL COMMENT 'populated only after a successful publish',
+  ebay_offer_id         VARCHAR(37)        NULL COMMENT 'Inventory API offerId - required to update/withdraw/publish an offer',
+  listing_duration_code VARCHAR(10)        NULL COMMENT 'eBay enum: Days_1, Days_3, Days_5, Days_7, Days_10, Days_14, GTC',
   payment_business_policy_id BIGINT UNSIGNED NULL COMMENT 'descriptor prefix because listing joins business_policy three times',
   fulfillment_business_policy_id BIGINT UNSIGNED NULL,
   return_business_policy_id BIGINT UNSIGNED NULL,
@@ -41,6 +43,7 @@ CREATE TABLE IF NOT EXISTS listing (
   CONSTRAINT pk_listing PRIMARY KEY (listing_id),
   CONSTRAINT uq_listing_item_relist UNIQUE (inventory_item_id, relist_sequence_number),
   CONSTRAINT uq_listing_ebay_item_id UNIQUE (ebay_item_id),
+  CONSTRAINT uq_listing_ebay_offer_id UNIQUE (ebay_offer_id),
   KEY idx_listing_marketplace_id (ebay_marketplace_id),
   KEY idx_listing_location_id (inventory_location_id),
   KEY idx_listing_status_end (listing_status_code, end_time_utc),
@@ -75,6 +78,8 @@ CREATE TABLE IF NOT EXISTS listing (
     AND (reserve_price_amount IS NULL OR reserve_price_amount >= 0)
     AND (bid_increment_amount IS NULL OR bid_increment_amount >= 0)),
   CONSTRAINT chk_listing_duration CHECK (duration_days IS NULL OR (duration_days >= 1 AND duration_days <= 90)),
+  CONSTRAINT chk_listing_duration_code CHECK (listing_duration_code IS NULL OR listing_duration_code IN
+    ('DAYS_1','DAYS_3','DAYS_5','DAYS_7','DAYS_10','DAYS_14','DAYS_30','GTC')),
   CONSTRAINT chk_listing_quantities CHECK (quantity_available >= 0 AND quantity_sold >= 0),
   CONSTRAINT chk_listing_time_window CHECK (
     start_time_utc IS NULL OR end_time_utc IS NULL OR end_time_utc > start_time_utc)

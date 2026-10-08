@@ -14,7 +14,7 @@ import os
 import sys
 from pathlib import Path
 
-import mysql.connector
+import mariadb
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,7 +29,7 @@ FULLTEXT_EXPECTING = {
 
 def rows(cursor, query, args=None):
     cursor.execute(query, args or ())
-    return cursor.fetchall()
+    return cursor.fetchall() if cursor.description else []
 
 
 def check(connection) -> list[str]:
@@ -38,14 +38,14 @@ def check(connection) -> list[str]:
     db = connection.database
 
     tables = [r[0] for r in rows(cursor,
-        "SELECT table_name FROM information_schema.tables WHERE table_schema=%s"
+        "SELECT table_name FROM information_schema.tables WHERE table_schema=?"
         " AND table_type='BASE TABLE' ORDER BY table_name", (db,))]
     problems.append(f"INFO: {len(tables)} base tables in {db}")
 
     for table in tables:
         cols = rows(cursor,
             "SELECT column_name, column_type, is_nullable, column_default, extra, ordinal_position"
-            " FROM information_schema.columns WHERE table_schema=%s AND table_name=%s"
+            " FROM information_schema.columns WHERE table_schema=? AND table_name=?"
             " ORDER BY ordinal_position", (db, table))
         names = [c[0] for c in cols]
 
@@ -57,7 +57,7 @@ def check(connection) -> list[str]:
 
         pk = [p[0] for p in rows(cursor,
             "SELECT column_name FROM information_schema.key_column_usage"
-            " WHERE table_schema=%s AND table_name=%s AND constraint_name='PRIMARY'", (db, table))]
+            " WHERE table_schema=? AND table_name=? AND constraint_name='PRIMARY'", (db, table))]
         if pk != [f"{table}_id"]:
             problems.append(f"{table}: primary key is {pk}, expected ['{table}_id']")
         else:
@@ -87,10 +87,10 @@ def check(connection) -> list[str]:
             " FROM information_schema.referential_constraints r"
             " JOIN information_schema.key_column_usage k"
             "   ON k.constraint_name=r.constraint_name AND k.constraint_schema=r.constraint_schema"
-            " WHERE r.constraint_schema=%s AND r.table_name=%s", (db, table))
+            " WHERE r.constraint_schema=? AND r.table_name=?", (db, table))
         indexed_first = {i[0] for i in rows(cursor,
             "SELECT DISTINCT column_name FROM information_schema.statistics"
-            " WHERE table_schema=%s AND table_name=%s AND seq_in_index=1", (db, table))}
+            " WHERE table_schema=? AND table_name=? AND seq_in_index=1", (db, table))}
         for _ref_table, col, delete_rule in fks:
             if col not in indexed_first:
                 problems.append(f"{table}.{col}: foreign key column is not indexed")
@@ -107,10 +107,10 @@ def check(connection) -> list[str]:
             if fks:
                 composite = rows(cursor,
                     "SELECT COUNT(DISTINCT s.index_name) FROM information_schema.statistics s"
-                    " WHERE s.table_schema=%s AND s.table_name=%s AND s.column_name=%s"
+                    " WHERE s.table_schema=? AND s.table_name=? AND s.column_name=?"
                     "   AND s.index_name IN ("
                     "     SELECT s2.index_name FROM information_schema.statistics s2"
-                    "     WHERE s2.table_schema=%s AND s2.table_name=%s"
+                    "     WHERE s2.table_schema=? AND s2.table_name=?"
                     "     GROUP BY s2.index_name HAVING COUNT(DISTINCT s2.column_name) > 1)",
                     (db, table, name, db, table))
                 if composite[0][0] == 0:
@@ -118,30 +118,30 @@ def check(connection) -> list[str]:
             else:
                 single = rows(cursor,
                     "SELECT COUNT(*) FROM information_schema.statistics"
-                    " WHERE table_schema=%s AND table_name=%s AND column_name=%s", (db, table, name))
+                    " WHERE table_schema=? AND table_name=? AND column_name=?", (db, table, name))
                 if single[0][0] == 0:
                     problems.append(f"{table}.{name}: ordering column is not indexed")
 
     for table, (title, desc) in FULLTEXT_EXPECTING.items():
         ft = rows(cursor,
             "SELECT DISTINCT index_name FROM information_schema.statistics"
-            " WHERE table_schema=%s AND table_name=%s AND index_type='FULLTEXT'", (db, table))
+            " WHERE table_schema=? AND table_name=? AND index_type='FULLTEXT'", (db, table))
         if not ft:
             problems.append(f"{table}: missing FULLTEXT index on ({title}, {desc})")
 
     total_checks = rows(cursor,
         "SELECT COUNT(DISTINCT constraint_name) FROM information_schema.check_constraints"
-        " WHERE constraint_schema=%s", (db,))[0][0]
+        " WHERE constraint_schema=?", (db,))[0][0]
     problems.append(f"INFO: {total_checks} CHECK constraints defined")
     covered = {t for (t,) in rows(cursor,
         "SELECT DISTINCT table_name FROM information_schema.check_constraints"
-        " WHERE constraint_schema=%s AND constraint_name NOT LIKE '%%_not_null'", (db,))}
+        " WHERE constraint_schema=? AND constraint_name NOT LIKE '%_not_null'", (db,))}
     for table in tables:
         if table not in covered:
             problems.append(f"{table}: no named CHECK constraint defined")
 
     collations = rows(cursor,
-        "SELECT DISTINCT table_collation FROM information_schema.tables WHERE table_schema=%s", (db,))
+        "SELECT DISTINCT table_collation FROM information_schema.tables WHERE table_schema=?", (db,))
     if len(collations) != 1:
         problems.append(f"mixed collations present: {[c[0] for c in collations]}")
     cursor.close()
@@ -153,7 +153,7 @@ def main() -> int:
     parser.add_argument("--database", default=None, help="override DB_NAME")
     args = parser.parse_args()
     load_dotenv(PROJECT_ROOT / ".env")
-    connection = mysql.connector.connect(
+    connection = mariadb.connect(
         host=os.getenv("DB_HOST", "localhost"), port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
         database=args.database or os.getenv("DB_NAME", "ebay_api"))

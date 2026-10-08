@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# .env.template is the placeholder-only reference file and IS meant to be committed.
+# It must never hold real values - see the warning header inside it.
+!.env.template
 
 # Python compilation files
 __pycache__/
@@ -21,3 +24,6 @@ env/
 
 # Other Files
 gemini-resume.txt
+
+# Personal working to-do list - local only, never publish to GitHub
+TODO.md

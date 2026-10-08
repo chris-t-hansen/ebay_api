@@ -1,11 +1,21 @@
 # eBay API Automation & Tracker - Python dependencies
 # Install:  python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 
-# Database driver. The project code (schema/apply_migrations.py, test_db_connection.py) uses
-# MySQL Connector/Python, which talks to MariaDB 11.8 fine. SKILL.md nominates the `mariadb`
-# package instead; if you switch, change the two connect() call sites and swap this line for
-# `mariadb==3.4.4`. Pick one driver and keep it - do not mix.
-mysql-connector-python==26.7.0
+# Database driver: MariaDB Connector/Python (SKILL.md choice; mysql-connector-python was
+# deliberately removed so only one driver is in play).
+#
+# STABLE 1.1.14 is installed, built from source on this host (aarch64 + Python 3.13). The build
+# needs these system packages (already installed here):
+#   sudo apt-get install build-essential python3-dev cmake pkg-config libmariadb-dev libmariadb-dev-compat
+# then:  pip install --no-binary=:all: --no-cache-dir mariadb==1.1.14
+# If those packages are ever missing, the fallback is the bundled wheel: pip install --only-binary=:all: mariadb
+# (that resolves to 2.0.0rc2, a release candidate, for cp313/aarch64).
+#
+# Driver gotchas that the code already handles:
+#   * 1.1.x rejects charset=/characterset= connect kwargs -> use SET NAMES utf8mb4 (see connect())
+#   * paramstyle is qmark (?), not %s
+#   * fetchall() after INSERT/DDL raises ProgrammingError -> guard on cursor.description
+mariadb==1.1.14
 python-dotenv==1.2.4
 
 # eBay API integration (add when the first client module is written)

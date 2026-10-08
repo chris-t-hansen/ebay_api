@@ -6,8 +6,8 @@
     python schema/apply_migrations.py --status     show what is pending
     python schema/apply_migrations.py --database scratch_db   target another database
 
-SKILL.md mandates: tables are created programmatically, versioned in schema_migration, and
-every automated task supports a dry run.
+Driver: `mariadb` (MariaDB Connector/Python). SKILL.md mandates programmatic, versioned table
+creation and a dry-run mode for every automated task.
 """
 from __future__ import annotations
 
@@ -20,11 +20,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import mysql.connector
+import mariadb
 from dotenv import load_dotenv
 
 MIGRATION_DIR = Path(__file__).resolve().parent / "migrations"
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+MIGRATION_LOCK = "ebay_api_schema_migration"
 VERSION_RE = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9_]+)\.sql$")
 TABLE_DDL_RE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+`?(\w+)`?", re.IGNORECASE)
 
@@ -127,19 +128,36 @@ def split_statements(sql: str) -> list[str]:
     return statements
 
 
-def connect(database: str | None) -> mysql.connector.MySQLConnection:
-    """Open an autocommit connection using credentials from the project .env file."""
+def connect(database: str | None) -> mariadb.Connection:
+    """Open an autocommit connection using credentials from the project .env file.
+
+    Note: mariadb 1.1.x accepts neither `charset` nor `characterset` as a connect kwarg (the 2.0
+    release candidate silently ignored `charset`), so the client charset is set with SET NAMES,
+    which works on every driver version. The server default is already utf8mb4.
+    """
     load_dotenv(ENV_FILE)
     target = database or os.getenv("DB_NAME", "ebay_api")
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=int(os.getenv("DB_PORT", "3306")),
+    connection = mariadb.connect(
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "3306")),
         database=target,
         autocommit=True,
-        charset="utf8mb4",
     )
+    with connection.cursor() as cursor:
+        cursor.execute("SET NAMES utf8mb4")
+    return connection
+
+
+def server_version(connection: mariadb.Connection) -> str:
+    """mariadb exposes server_version as an integer such as 110806; render it readably."""
+    raw = getattr(connection, "server_version", None)
+    if isinstance(raw, int):
+        return f"{raw // 10000}.{raw // 100 % 100}.{raw % 100}"
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT VERSION()")
+        return str(cursor.fetchone()[0])
 
 
 # Mirrors migration 0001 so the bookkeeping table exists before its first row is written.
@@ -163,12 +181,12 @@ CREATE TABLE IF NOT EXISTS schema_migration (
 
 
 def applied_migrations(connection) -> dict[str, str]:
-    """Return applied versions; empty when the bookkeeping table does not exist yet,
-    which is the normal state for --dry-run / --status on a fresh database."""
+    """Applied version -> checksum. Empty when the bookkeeping table does not exist yet,
+    which is the normal state for --dry-run / --status against a fresh database."""
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"
-            " AND table_name = 'schema_migration'")
+            "SELECT COUNT(*) FROM information_schema.tables"
+            " WHERE table_schema = DATABASE() AND table_name = 'schema_migration'")
         if cursor.fetchone()[0] == 0:
             return {}
         cursor.execute("SELECT migration_version, migration_checksum FROM schema_migration")
@@ -182,7 +200,7 @@ def run_migration(connection, migration: Migration) -> None:
             cursor.execute(statement)
         cursor.execute(
             "INSERT INTO schema_migration (migration_version, migration_name, migration_checksum)"
-            " VALUES (%s, %s, %s)",
+            " VALUES (?, ?, ?)",
             (migration.version, migration.name, migration.checksum),
         )
     suffix = f", tables: {', '.join(migration.tables)}" if migration.tables else ""
@@ -200,20 +218,29 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(levelname)-7s %(message)s")
     log = logging.getLogger("apply_migrations")
 
-    migrations = discover_migrations(MIGRATION_DIR)
+    try:
+        migrations = discover_migrations(MIGRATION_DIR)
+    except ValueError as error:
+        log.error("%s", error)
+        return 2
     log.info("Discovered %d migrations in %s", len(migrations), MIGRATION_DIR)
 
-    connection = connect(args.database)
+    try:
+        connection = connect(args.database)
+    except mariadb.Error as error:
+        log.error("Connect failed: %s", error.msg)
+        return 1
     try:
         # Advisory lock: two concurrent runs otherwise race and both apply the same migration
         # (observed as "Duplicate entry '0013' for key 'uq_schema_migration_version'").
         with connection.cursor() as cursor:
-            cursor.execute("SELECT GET_LOCK('ebay_api_schema_migration', 10)")
+            cursor.execute("SELECT GET_LOCK(?, 10)", (MIGRATION_LOCK,))
             if cursor.fetchone()[0] != 1:
                 log.error("Another migration run holds the lock; aborting")
                 return 3
-        log.info("Target database: %s (server %s)", connection.database, connection.server_info)
-        if not (args.dry_run or args.status):
+        log.info("Target database: %s (server %s)", connection.database, server_version(connection))
+        read_only = args.dry_run or args.status
+        if not read_only:
             with connection.cursor() as cursor:
                 cursor.execute(TRACKING_DDL)
         already = applied_migrations(connection)
@@ -228,25 +255,25 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             preview = len(split_statements(migration.sql))
             suffix = f", tables: {', '.join(migration.tables)}" if migration.tables else ""
-            if args.dry_run or args.status:
+            if read_only:
                 log.info("pending  %s (%d statements%s)", migration.label, preview, suffix)
                 continue
             run_migration(connection, migration)
 
-        if args.dry_run or args.status:
+        if read_only:
             log.info("%d applied, %d pending - database unchanged",
                      len(already), len(migrations) - len(already))
         else:
             log.info("Schema is current in %s", connection.database)
         return 0
-    except (mysql.connector.Error, ValueError) as error:
-        log.error("%s", error)
+    except mariadb.Error as error:
+        log.error("%s (errno %s, sqlstate %s)", error.msg, error.errno, error.sqlstate)
         return 1
     finally:
         try:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT RELEASE_LOCK('ebay_api_schema_migration')")
-        except mysql.connector.Error:
+                cursor.execute("SELECT RELEASE_LOCK(?)", (MIGRATION_LOCK,))
+        except mariadb.Error:
             pass  # closing the session releases the advisory lock regardless
         connection.close()
 
