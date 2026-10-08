@@ -1,0 +1,16 @@
+# eBay API Automation & Tracker - Python dependencies
+# Install:  python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# Database driver. The project code (schema/apply_migrations.py, test_db_connection.py) uses
+# MySQL Connector/Python, which talks to MariaDB 11.8 fine. SKILL.md nominates the `mariadb`
+# package instead; if you switch, change the two connect() call sites and swap this line for
+# `mariadb==3.4.4`. Pick one driver and keep it - do not mix.
+mysql-connector-python==26.7.0
+python-dotenv==1.2.4
+
+# eBay API integration (add when the first client module is written)
+# requests==2.32.4
+# ebaysdk==2.2.1
+
+# Testing
+pytest==8.3.5
